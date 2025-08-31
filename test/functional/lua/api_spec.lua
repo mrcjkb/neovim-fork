@@ -393,4 +393,13 @@ describe('luaeval(vim.api.…)', function()
   it('serializes sparse arrays in Lua', function()
     eq({ [1] = vim.NIL, [2] = 2 }, exec_lua [[ return { [2] = 2 } ]])
   end)
+
+  it('serializes mixed tables in Lua', function()
+    eq({
+      [1] = "1",
+      [true] = "true",
+      ["one"] = "one",
+    }, exec_lua [[ return { [1] = "1", [true] = "true", ["one"] = "one", } ]])
+  end)
+
 end)

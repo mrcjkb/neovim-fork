@@ -31,6 +31,7 @@
 typedef struct {
   size_t maxidx;  ///< Maximum positive integral value found.
   size_t string_keys_num;  ///< Number of string keys.
+  size_t dict_keys_num;  ///< Number of keys that can be converted to dictionary keys.
   bool has_string_with_nul;  ///< True if there is string key with NUL byte.
   ObjectType type;  ///< If has_type_key is true then attached value. Otherwise
                     ///< either kObjectTypeNil, kObjectTypeDict or
@@ -161,6 +162,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
         lua_pop(lstate, 2);
       }
     } else if (ret.string_keys_num == tsize) {
+      // TODO(mrcjkb): introduce string_keys_num?
       ret.type = kObjectTypeDict;
     } else {
       ret.type = kObjectTypeNil;
@@ -1020,6 +1022,7 @@ static Dict nlua_pop_Dict_unchecked(lua_State *lstate, const LuaTableProps table
       }
       i++;
     } else {
+      // TODO(mrcjkb): check for LUA_TNUMBER and convert to string
       lua_pop(lstate, 1);
       // stack: dict, key
     }
