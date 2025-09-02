@@ -74,6 +74,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
         ret.has_string_with_nul = true;
       }
       ret.string_keys_num++;
+      ret.dict_keys_num++;
       break;
     }
     case LUA_TNUMBER: {
@@ -87,6 +88,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
           ret.maxidx = idx;
         }
       }
+      ret.dict_keys_num++;
       break;
     }
     case LUA_TBOOLEAN: {
@@ -162,7 +164,6 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
         lua_pop(lstate, 2);
       }
     } else if (ret.string_keys_num == tsize) {
-      // TODO(mrcjkb): introduce string_keys_num?
       ret.type = kObjectTypeDict;
     } else {
       ret.type = kObjectTypeNil;
@@ -710,7 +711,23 @@ void nlua_push_Dict(lua_State *lstate, const Dict dict, int flags)
     lua_setmetatable(lstate, -2);
   }
   for (size_t i = 0; i < dict.size; i++) {
-    nlua_push_String(lstate, dict.items[i].key, flags);
+    const String key = dict.items[i].key;
+    // TODO(mrcjkb): Store this as a constant and extract helper function for readability
+    const char *int_key_prefix = "__lua_tbl_int_key-";
+    size_t int_key_prefix_len = strlen(int_key_prefix);
+    if (key.size > int_key_prefix_len 
+        && strncmp(key.data, int_key_prefix, int_key_prefix_len) == 0) {
+      // The dictionary was created from a mixed Lua table/list
+      const char *int_part = key.data + int_key_prefix_len;
+      char *endptr = NULL;
+      long int_key = strtol(int_part, &endptr, 10);
+      if (endptr != int_part && *endptr == '\0') {
+        nlua_push_Object(lstate, &dict.items[i].value, flags);
+        lua_rawseti(lstate, -2, (int)int_key);
+        continue;
+      }
+    }
+    nlua_push_String(lstate, key, flags);
     nlua_push_Object(lstate, &dict.items[i].value, flags);
     lua_rawset(lstate, -3);
   }
@@ -985,18 +1002,19 @@ static Dict nlua_pop_Dict_unchecked(lua_State *lstate, const LuaTableProps table
                                     Arena *arena, Error *err)
   FUNC_ATTR_NONNULL_ARG(1, 5) FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  Dict ret = arena_dict(arena, table_props.string_keys_num);
+  Dict ret = arena_dict(arena, table_props.dict_keys_num);
 
-  if (table_props.string_keys_num == 0) {
+  if (table_props.dict_keys_num == 0) {
     lua_pop(lstate, 1);
     return ret;
   }
 
   lua_pushnil(lstate);
-  for (size_t i = 0; lua_next(lstate, -2) && i < table_props.string_keys_num;) {
+  for (size_t i = 0; lua_next(lstate, -2) && i < table_props.dict_keys_num;) {
     // stack: dict, key, value
 
-    if (lua_type(lstate, -2) == LUA_TSTRING) {
+    int key_type = lua_type(lstate, -2);
+    if (key_type == LUA_TSTRING) {
       lua_pushvalue(lstate, -2);
       // stack: dict, key, value, key
 
@@ -1006,6 +1024,41 @@ static Dict nlua_pop_Dict_unchecked(lua_State *lstate, const LuaTableProps table
       if (!ERROR_SET(err)) {
         Object value = nlua_pop_Object(lstate, ref, arena, err);
         kv_push_c(ret, ((KeyValuePair) { .key = key, .value = value }));
+        // stack: dict, key
+      } else {
+        lua_pop(lstate, 1);
+        // stack: dict, key
+      }
+
+      if (ERROR_SET(err)) {
+        if (!arena) {
+          api_free_dict(ret);
+        }
+        lua_pop(lstate, 2);
+        // stack:
+        return (Dict) { .size = 0, .items = NULL };
+      }
+      i++;
+    } else if (key_type == LUA_TNUMBER) {
+      // TODO(mrcjkb): DEDUP
+      lua_pushvalue(lstate, -2);
+      // stack: dict, key, value, key
+
+      Integer key = nlua_pop_Integer(lstate, arena, err);
+
+      char string_key_buf[32];
+      int len = snprintf(string_key_buf, sizeof(string_key_buf), "__lua_tbl_int_key-%d", key);
+      assert(len > 0 && (size_t)len < sizeof(string_key_buf));
+
+      // stack: dict, key, value
+      String string_key;
+      string_key.size = (size_t)len;
+      string_key.data = arena_memdupz(arena, string_key_buf, string_key.size);
+      assert(string_key.data != NULL);
+
+      if (!ERROR_SET(err)) {
+        Object value = nlua_pop_Object(lstate, ref, arena, err);
+        kv_push_c(ret, ((KeyValuePair) { .key = string_key, .value = value }));
         // stack: dict, key
       } else {
         lua_pop(lstate, 1);
