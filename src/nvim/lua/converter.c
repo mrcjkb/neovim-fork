@@ -30,7 +30,6 @@
 /// Determine, which keys Lua table contains
 typedef struct {
   size_t maxidx;  ///< Maximum positive integral value found.
-  size_t string_keys_num;  ///< Number of string keys.
   size_t dict_keys_num;  ///< Number of keys that can be converted to dictionary keys.
   bool has_string_with_nul;  ///< True if there is string key with NUL byte.
   ObjectType type;  ///< If has_type_key is true then attached value. Otherwise
@@ -56,6 +55,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
   bool has_val_key = false;  // True if val key was found,
                              // @see nlua_push_val_idx().
   size_t other_keys_num = 0;  // Number of keys that are not string, integral
+  size_t string_keys_num = 0; // Number of string keys.
                               // or type keys.
   LuaTableProps ret;
   CLEAR_FIELD(ret);
@@ -73,7 +73,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
       if (memchr(s, NUL, len) != NULL) {
         ret.has_string_with_nul = true;
       }
-      ret.string_keys_num++;
+      string_keys_num++;
       ret.dict_keys_num++;
       break;
     }
@@ -139,7 +139,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
                             - ret.has_type_key
                             - other_keys_num
                             - has_val_key
-                            - ret.string_keys_num)) {
+                            - string_keys_num)) {
         for (ret.maxidx = 0;; ret.maxidx++) {
           lua_rawgeti(lstate, -1, (int)ret.maxidx + 1);
           if (lua_isnil(lstate, -1)) {
@@ -154,7 +154,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
     if (tsize == 0
         || (tsize <= ret.maxidx
             && other_keys_num == 0
-            && ret.string_keys_num == 0)) {
+            && string_keys_num == 0)) {
       ret.type = kObjectTypeArray;
       if (tsize == 0 && lua_getmetatable(lstate, -1)) {
         nlua_pushref(lstate, nlua_global_refs->empty_dict_ref);
@@ -163,7 +163,7 @@ static LuaTableProps nlua_traverse_table(lua_State *const lstate)
         }
         lua_pop(lstate, 2);
       }
-    } else if (ret.string_keys_num == tsize) {
+    } else if (ret.dict_keys_num == tsize) {
       ret.type = kObjectTypeDict;
     } else {
       ret.type = kObjectTypeNil;
@@ -326,7 +326,7 @@ bool nlua_pop_typval(lua_State *lstate, typval_T *ret_tv)
         }
         break;
       case kObjectTypeDict:
-        if (table_props.string_keys_num == 0) {
+        if (table_props.dict_keys_num == 0) {
           cur.tv->v_type = VAR_DICT;
           cur.tv->vval.v_dict = tv_dict_alloc();
           cur.tv->vval.v_dict->dv_refcount++;
@@ -334,7 +334,7 @@ bool nlua_pop_typval(lua_State *lstate, typval_T *ret_tv)
         } else {
           cur.special = table_props.has_string_with_nul;
           if (table_props.has_string_with_nul) {
-            decode_create_map_special_dict(cur.tv, (ptrdiff_t)table_props.string_keys_num);
+            decode_create_map_special_dict(cur.tv, (ptrdiff_t)table_props.dict_keys_num);
             assert(cur.tv->v_type == VAR_DICT);
             dictitem_T *const val_di = tv_dict_find(cur.tv->vval.v_dict,
                                                     S_LEN("_VAL"));
@@ -342,7 +342,7 @@ bool nlua_pop_typval(lua_State *lstate, typval_T *ret_tv)
             cur.tv = &val_di->di_tv;
             cur.tv->vval.v_list->lua_table_ref = table_ref;
             assert(cur.tv->v_type == VAR_LIST);
-            cur.list_len = table_props.string_keys_num;
+            cur.list_len = table_props.dict_keys_num;
           } else {
             cur.tv->v_type = VAR_DICT;
             cur.tv->vval.v_dict = tv_dict_alloc();
@@ -360,8 +360,9 @@ bool nlua_pop_typval(lua_State *lstate, typval_T *ret_tv)
         cur.tv->vval.v_float = (float_T)table_props.val;
         break;
       case kObjectTypeNil:
+        // TODO(mrcjkb): This needs to be translated
         emsg(_("E5100: Cannot convert given Lua table: table should "
-               "contain either only integer keys or only string keys"));
+               "contain only integer and/or string keys"));
         ret = false;
         break;
       default:
@@ -705,7 +706,7 @@ void nlua_push_Boolean(lua_State *lstate, const Boolean b, int flags)
 void nlua_push_Dict(lua_State *lstate, const Dict dict, int flags)
   FUNC_ATTR_NONNULL_ALL
 {
-  lua_createtable(lstate, 0, (int)dict.size);
+  lua_createtable(lstate, 0, 0);
   if (dict.size == 0) {
     nlua_pushref(lstate, nlua_global_refs->empty_dict_ref);
     lua_setmetatable(lstate, -2);
@@ -717,19 +718,25 @@ void nlua_push_Dict(lua_State *lstate, const Dict dict, int flags)
     size_t int_key_prefix_len = strlen(int_key_prefix);
     if (key.size > int_key_prefix_len 
         && strncmp(key.data, int_key_prefix, int_key_prefix_len) == 0) {
-      // The dictionary was created from a mixed Lua table/list
+      // Try to create a mixed Lua table/list, parsing integer keys from the prefix.
+      // If we fail, we fall back to pushing the string key.
       const char *int_part = key.data + int_key_prefix_len;
       char *endptr = NULL;
-      long int_key = strtol(int_part, &endptr, 10);
-      if (endptr != int_part && *endptr == '\0') {
+      errno = 0;
+      int int_key = (int)strtol(int_part, &endptr, 10);
+      if (errno == 0 && endptr != int_part && *endptr == '\0') {
         nlua_push_Object(lstate, &dict.items[i].value, flags);
-        lua_rawseti(lstate, -2, (int)int_key);
+        // stack: table, value
+        lua_rawseti(lstate, -2, int_key);
+        // stack: table
         continue;
       }
     }
     nlua_push_String(lstate, key, flags);
     nlua_push_Object(lstate, &dict.items[i].value, flags);
+    // stack: table, key, value
     lua_rawset(lstate, -3);
+    // stack: table
   }
 }
 
@@ -1205,8 +1212,8 @@ Object nlua_pop_Object(lua_State *const lstate, bool ref, Arena *arena, Error *c
         break;
       case kObjectTypeDict:
         *cur.obj = DICT_OBJ(((Dict)ARRAY_DICT_INIT));
-        if (table_props.string_keys_num != 0) {
-          cur.obj->data.dict = arena_dict(arena, table_props.string_keys_num);
+        if (table_props.dict_keys_num != 0) {
+          cur.obj->data.dict = arena_dict(arena, table_props.dict_keys_num);
           cur.container = true;
           assert(kv_size(stack) < SIZE_MAX);
           kvi_push(stack, cur);
