@@ -209,16 +209,27 @@ bool nlua_pop_typval(lua_State *lstate, typval_T *ret_tv)
       if (cur.special || cur.tv->v_type == VAR_DICT) {
         assert(cur.tv->v_type == (cur.special ? VAR_LIST : VAR_DICT));
         bool next_key_found = false;
+        const char *s = NULL;
+        size_t len = 0;
         while (lua_next(lstate, -2)) {
-          if (lua_type(lstate, -2) == LUA_TSTRING) {
+          int key_type = lua_type(lstate, -2);
+          if (key_type == LUA_TSTRING) {
+            s = lua_tolstring(lstate, -2, &len);
+            next_key_found = true;
+            break;
+          } else if (key_type == LUA_TNUMBER) {
+            lua_Integer int_key = lua_tointeger(lstate, -2);
+            char string_key_buf[32];
+            int slen = snprintf(string_key_buf, sizeof(string_key_buf), "__unkeyed_int-%d", int_key);
+            assert(slen > 0 && (size_t)slen < sizeof(string_key_buf));
+            s = string_key_buf;
+            len = (size_t)slen;
             next_key_found = true;
             break;
           }
           lua_pop(lstate, 1);
         }
         if (next_key_found) {
-          size_t len;
-          const char *s = lua_tolstring(lstate, -2, &len);
           if (cur.special) {
             list_T *const kv_pair = tv_list_alloc(2);
 
@@ -714,7 +725,7 @@ void nlua_push_Dict(lua_State *lstate, const Dict dict, int flags)
   for (size_t i = 0; i < dict.size; i++) {
     const String key = dict.items[i].key;
     // TODO(mrcjkb): Store this as a constant and extract helper function for readability
-    const char *int_key_prefix = "__lua_tbl_int_key-";
+    const char *int_key_prefix = "__unkeyed_int-";
     size_t int_key_prefix_len = strlen(int_key_prefix);
     if (key.size > int_key_prefix_len 
         && strncmp(key.data, int_key_prefix, int_key_prefix_len) == 0) {
@@ -1054,7 +1065,7 @@ static Dict nlua_pop_Dict_unchecked(lua_State *lstate, const LuaTableProps table
       Integer key = nlua_pop_Integer(lstate, arena, err);
 
       char string_key_buf[32];
-      int len = snprintf(string_key_buf, sizeof(string_key_buf), "__lua_tbl_int_key-%d", key);
+      int len = snprintf(string_key_buf, sizeof(string_key_buf), "__unkeyed_int-%d", key);
       assert(len > 0 && (size_t)len < sizeof(string_key_buf));
 
       // stack: dict, key, value
@@ -1082,7 +1093,6 @@ static Dict nlua_pop_Dict_unchecked(lua_State *lstate, const LuaTableProps table
       }
       i++;
     } else {
-      // TODO(mrcjkb): check for LUA_TNUMBER and convert to string
       lua_pop(lstate, 1);
       // stack: dict, key
     }
@@ -1138,22 +1148,35 @@ Object nlua_pop_Object(lua_State *const lstate, bool ref, Arena *arena, Error *c
           lua_pop(lstate, 2);
           continue;
         }
-        bool next_key_found = false;
+        int key_type = LUA_TNONE;
         while (lua_next(lstate, -2)) {
           // stack: …, dict, new key, val
-          if (lua_type(lstate, -2) == LUA_TSTRING) {
-            next_key_found = true;
+          key_type = lua_type(lstate, -2);
+          if (key_type == LUA_TSTRING || key_type == LUA_TNUMBER) {
             break;
           }
           lua_pop(lstate, 1);
           // stack: …, dict, new key
         }
-        if (next_key_found) {
+        if (key_type == LUA_TSTRING) {
           // stack: …, dict, new key, val
           size_t len;
           const char *s = lua_tolstring(lstate, -2, &len);
           const size_t idx = cur.obj->data.dict.size++;
           cur.obj->data.dict.items[idx].key = CBUF_TO_ARENA_STR(arena, s, len);
+          kvi_push(stack, cur);
+          cur = (ObjPopStackItem){ .obj = &cur.obj->data.dict.items[idx].value };
+        } else if (key_type == LUA_TNUMBER) {
+          // stack: …, dict, new key, val
+          lua_Integer int_key = lua_tointeger(lstate, -2);
+          char string_key_buf[32];
+          int slen = snprintf(string_key_buf, sizeof(string_key_buf), "__unkeyed_int-%d", int_key);
+          assert(slen > 0 && (size_t)slen < sizeof(string_key_buf));
+          const size_t idx = cur.obj->data.dict.size++;
+          String key_str;
+          key_str.size = (size_t)slen;
+          key_str.data = arena_memdupz(arena, string_key_buf, key_str.size);
+          cur.obj->data.dict.items[idx].key = key_str;
           kvi_push(stack, cur);
           cur = (ObjPopStackItem){ .obj = &cur.obj->data.dict.items[idx].value };
         } else {

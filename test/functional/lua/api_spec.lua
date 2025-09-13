@@ -170,7 +170,11 @@ describe('luaeval(vim.api.…)', function()
       )
     )
     eq(
-      { foo = 2 },
+      {
+        [1] = 42,
+        [5] = 1,
+        foo = 2,
+      },
       fn.luaeval(
         'vim.api.nvim__id({[vim.type_idx]=vim.types.dictionary, [vim.val_idx]=10, [5]=1, foo=2, [1]=42})'
       )
@@ -201,7 +205,11 @@ describe('luaeval(vim.api.…)', function()
       )
     )
     eq(
-      { { foo = 2 } },
+      { {
+          [1] = 42,
+          [5] = 1,
+          foo = 2,
+      } },
       fn.luaeval(
         'vim.api.nvim__id_array({{[vim.type_idx]=vim.types.dictionary, [vim.val_idx]=10, [5]=1, foo=2, [1]=42}})'
       )

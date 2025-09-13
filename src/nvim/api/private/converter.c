@@ -152,7 +152,6 @@ static inline void typval_encode_after_key(EncodedData *const edata)
   Object *const dict = &kv_last(edata->stack);
   assert(dict->type == kObjectTypeDict);
   assert(dict->data.dict.size < dict->data.dict.capacity);
-  // TODO(mrcjkb): Add support for kObjectTypeInteger keys
   if (key.type == kObjectTypeString) {
     dict->data.dict.items[dict->data.dict.size].key
       = key.data.string;
