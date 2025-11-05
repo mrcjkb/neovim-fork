@@ -10,7 +10,6 @@ local command = n.command
 local set_method_error = n.set_method_error
 local api = n.api
 local async_meths = n.async_meths
-local test_build_dir = t.paths.test_build_dir
 local nvim_prog = n.nvim_prog
 local testprg = n.testprg
 local exec = n.exec
@@ -852,7 +851,7 @@ describe('ui/ext_messages', function()
     }
   end)
 
-  it('supports &showcmd and &ruler', function()
+  it("supports 'showcmd' and 'ruler(format)'", function()
     command('set showcmd ruler')
     command('hi link MsgArea ErrorMsg')
     screen:expect({
@@ -940,19 +939,26 @@ describe('ui/ext_messages', function()
       ]],
       ruler = { { '2,0-1   All', 'MsgArea' } },
     }
-
-    -- when ruler is part of statusline it is not externalized.
-    -- this will be added as part of future ext_statusline support
-    command('set laststatus=2')
+    command('set rulerformat=Foo%#ErrorMsg#Bar')
     screen:expect({
       grid = [[
         abcde                    |
         ^                         |
-        {1:~                        }|*2
-        {3:<] [+] 2,0-1          All}|
+        {1:~                        }|*3
       ]],
-      ruler = { { '2,0-1   All', 'MsgArea' } },
+      ruler = { { 'Foo', 'MsgArea' }, { 'Bar', 9, 'ErrorMsg' } },
     })
+    command('set rulerformat=')
+
+    -- when ruler is part of statusline it is not externalized.
+    -- this will be added as part of future ext_statusline support
+    command('set laststatus=2')
+    screen:expect([[
+      abcde                    |
+      ^                         |
+      {1:~                        }|*2
+      {3:<] [+] 2,0-1          All}|
+    ]])
   end)
 
   it('keeps history of message of different kinds', function()
@@ -2037,7 +2043,7 @@ vimComment     xxx match /\s"[^\-:.%#=*].*$/ms=s+1,lc=1  excludenl contains=@vim
       {MATCH: +}type  :help news{18:<Enter>} to see changes in v{MATCH:%d+%.%d+ +}|
                                                                                       |
                                Help poor children in Uganda!                          |
-                       type  :help iccf{18:<Enter>}       for information                  |
+                       type  :help Kuwasha{18:<Enter>}    for information                  |
                                                                                       |*2
       {3:                                                                                }|
                                                                                       |
@@ -2045,6 +2051,16 @@ vimComment     xxx match /\s"[^\-:.%#=*].*$/ms=s+1,lc=1  excludenl contains=@vim
     ]])
     feed('<CR>')
     assert_alive()
+  end)
+
+  it('no wait return before delayed exception error message', function()
+    feed('ia<esc>:lua vim.cmd.quit()<CR>')
+    screen:expect({
+      any = {
+        '{9:.*Vim:E37: No write since.*}',
+        '{6:Press ENTER or type command to continue}^',
+      },
+    })
   end)
 end)
 
@@ -2086,7 +2102,7 @@ describe('ui/ext_messages', function()
       {1:~{MATCH: +}}type  :help news{18:<Enter>} to see changes in v{MATCH:%d+%.%d+}{1:{MATCH: +}}|
       {1:~                                                                               }|
       {1:~                        }Help poor children in Uganda!{1:                          }|
-      {1:~                }type  :help iccf{18:<Enter>}       for information {1:                 }|
+      {1:~                }type  :help Kuwasha{18:<Enter>}    for information {1:                 }|
       {1:~                                                                               }|*5
     ]]
     local showmode = { { '-- INSERT --', 5, 'ModeMsg' } }
@@ -2122,7 +2138,7 @@ describe('ui/ext_messages', function()
         {1:~{MATCH: +}}type  :help news{18:<Enter>} to see changes in v{MATCH:%d+%.%d+}{1:{MATCH: +}}|
         {1:~                                                                               }|
         {1:~                        }Help poor children in Uganda!{1:                          }|
-        {1:~                }type  :help iccf{18:<Enter>}       for information {1:                 }|
+        {1:~                }type  :help Kuwasha{18:<Enter>}    for information {1:                 }|
         {1:~                                                                               }|*5
       ]],
       showmode = showmode,
@@ -2159,7 +2175,7 @@ describe('ui/ext_messages', function()
         {MATCH: +}type  :help news{18:<Enter>} to see changes in v{MATCH:%d+%.%d+ +}|
                                                                                         |
                                  Help poor children in Uganda!                          |
-                         type  :help iccf{18:<Enter>}       for information                  |
+                         type  :help Kuwasha{18:<Enter>}    for information                  |
                                                                                         |*5
       ]],
       cmdline = {
@@ -2298,7 +2314,7 @@ it('ui/ext_multigrid supports intro screen', function()
       {1:~{MATCH: +}}type  :help news{18:<Enter>} to see changes in v{MATCH:%d+%.%d+}{1:{MATCH: +}}|
       {1:~                                                                               }|
       {1:~                        }Help poor children in Uganda!{1:                          }|
-      {1:~                }type  :help iccf{18:<Enter>}       for information {1:                 }|
+      {1:~                }type  :help Kuwasha{18:<Enter>}    for information {1:                 }|
       {1:~                                                                               }|*4
     ## grid 3
                                                                                       |
@@ -2347,7 +2363,8 @@ describe('ui/msg_puts_printf', function()
     skip(not t.translations_enabled(), 'Nvim not built with ENABLE_TRANSLATIONS')
     local screen
     local cmd = ''
-    local locale_dir = test_build_dir .. '/share/locale/ja/LC_MESSAGES'
+    local build_dir = t.paths.test_build_dir
+    local locale_dir = build_dir .. '/share/locale/ja/LC_MESSAGES'
 
     clear({ env = { LANG = 'ja_JP.UTF-8' } })
     screen = Screen.new(25, 5)
@@ -2366,10 +2383,11 @@ describe('ui/msg_puts_printf', function()
       end
     end
 
-    os.execute('cmake -E make_directory ' .. locale_dir)
-    os.execute(
-      'cmake -E copy ' .. test_build_dir .. '/src/nvim/po/ja.mo ' .. locale_dir .. '/nvim.mo'
-    )
+    fn.mkdir(locale_dir, 'p')
+    fn.filecopy(build_dir .. '/src/nvim/po/ja.mo', locale_dir .. '/nvim.mo')
+    finally(function()
+      n.rmdir(build_dir .. '/share')
+    end)
 
     cmd = cmd .. '"' .. nvim_prog .. '" -u NONE -i NONE -Es -V1'
     command([[call jobstart(']] .. cmd .. [[',{'term':v:true})]])
@@ -2380,8 +2398,6 @@ describe('ui/msg_puts_printf', function()
       :                        |
                                |
     ]])
-
-    os.execute('cmake -E remove_directory ' .. test_build_dir .. '/share')
   end)
 end)
 

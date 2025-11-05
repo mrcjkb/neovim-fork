@@ -170,7 +170,11 @@ describe('luaeval(vim.api.…)', function()
       )
     )
     eq(
-      { foo = 2 },
+      {
+        [1] = 42,
+        [5] = 1,
+        foo = 2,
+      },
       fn.luaeval(
         'vim.api.nvim__id({[vim.type_idx]=vim.types.dictionary, [vim.val_idx]=10, [5]=1, foo=2, [1]=42})'
       )
@@ -201,7 +205,11 @@ describe('luaeval(vim.api.…)', function()
       )
     )
     eq(
-      { { foo = 2 } },
+      { {
+          [1] = 42,
+          [5] = 1,
+          foo = 2,
+      } },
       fn.luaeval(
         'vim.api.nvim__id_array({{[vim.type_idx]=vim.types.dictionary, [vim.val_idx]=10, [5]=1, foo=2, [1]=42}})'
       )
@@ -234,8 +242,13 @@ describe('luaeval(vim.api.…)', function()
         'vim.api.nvim__id_dict({v={[vim.type_idx]=vim.types.array, [vim.val_idx]=10, [5]=1, foo=2, [1]=42}})'
       )
     )
+    -- TODO(mrcjkb): adapt this to use integer keys
     eq(
-      { foo = 2 },
+      {
+        [1] = 42,
+        [5] = 1,
+        foo = 2
+      },
       fn.luaeval(
         'vim.api.nvim__id_dict({[vim.type_idx]=vim.types.dictionary, [vim.val_idx]=10, [5]=1, foo=2, [1]=42})'
       )
@@ -301,11 +314,12 @@ describe('luaeval(vim.api.…)', function()
   end)
 
   it('errors out correctly when working with API', function()
+    -- TODO(mrcjkb): change to table with [true] = "true"
     -- Conversion errors
-    eq(
-      [[Vim(call):E5108: Lua: [string "luaeval()"]:1: Invalid 'obj': Cannot convert given Lua table]],
-      remove_trace(exc_exec([[call luaeval("vim.api.nvim__id({1, foo=42})")]]))
-    )
+    -- eq(
+    --   [[Vim(call):E5108: Lua: [string "luaeval()"]:1: Invalid 'obj': Cannot convert given Lua table]],
+    --   remove_trace(exc_exec([[call luaeval("vim.api.nvim__id({1, foo=42})")]]))
+    -- )
     -- Errors in number of arguments
     eq(
       'Vim(call):E5108: Lua: [string "luaeval()"]:1: Expected 1 argument',
@@ -393,4 +407,12 @@ describe('luaeval(vim.api.…)', function()
   it('serializes sparse arrays in Lua', function()
     eq({ [1] = vim.NIL, [2] = 2 }, exec_lua [[ return { [2] = 2 } ]])
   end)
+
+  it('serializes mixed tables in Lua', function()
+    eq({
+      [1] = "1",
+      ["one"] = "one",
+    }, exec_lua [[ return { [1] = "1", ["one"] = "one", } ]])
+  end)
+
 end)

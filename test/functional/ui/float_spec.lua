@@ -433,6 +433,18 @@ describe('float window', function()
     eq(5, api.nvim_get_option_value('scroll', { win = float_win }))
   end)
 
+  it("lines('w$') after nvim_win_set_height with 'splitkeep=screen' #36056", function()
+    api.nvim_set_option_value('splitkeep', 'screen', {})
+    local buf = api.nvim_create_buf(false, true)
+    local win = api.nvim_open_win(buf, false, { width = 5, height = 1, col = 0, row = 0, relative = 'cursor' })
+    api.nvim_buf_set_lines(buf, 0, -1, true, { ('1'):rep(10), ('2'):rep(10) })
+    local line = exec_lua(function()
+      vim.api.nvim_win_set_height(win, vim.api.nvim_win_get_height(win) + 3)
+      return vim.fn.line('w$', win)
+    end)
+    eq(2, line)
+  end)
+
   it(':unhide works when there are floating windows', function()
     local float_opts = { relative = 'editor', row = 1, col = 1, width = 5, height = 5 }
     local w0 = curwin()
@@ -950,6 +962,19 @@ describe('float window', function()
     eq(1, fn.tabpagewinnr(2))
   end)
 
+  it('non-visible/focusable is not a valid previous window', function()
+    local win = api.nvim_open_win(0, true, { relative = 'editor', width = 2, height = 2, row = 2, col = 2, focusable = false })
+    command('wincmd p')
+    command('wincmd p')
+    neq(win, api.nvim_get_current_win())
+    api.nvim_win_set_config(win, { focusable = true, hide = true })
+    command('wincmd p')
+    neq(win, api.nvim_get_current_win())
+    api.nvim_win_set_config(win, { hide = false })
+    command('wincmd p')
+    eq(win, api.nvim_get_current_win())
+  end)
+
   it('no crash for unallocated relative window grid', function()
     local win = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, height = 1, width = 1 })
     exec_lua(function()
@@ -971,7 +996,56 @@ describe('float window', function()
     api.nvim_win_set_config(win, api.nvim_win_get_config(win))
   end)
 
-  local function with_ext_multigrid(multigrid)
+  it(':fclose does not crash from nasty autocommands', function()
+    local w1 = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 6 })
+    local w2 = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 5 })
+    local w3 = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 4 })
+    local w4 = api.nvim_open_win(0, true, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 3 })
+    exec_lua(function()
+      vim.api.nvim_create_autocmd('WinClosed', {
+        once = true,
+        callback = function()
+          vim.api.nvim_win_close(w2, true)
+        end,
+      })
+    end)
+    -- We close just the first three floats with highest zindex, so w4 remains open.
+    -- (despite w2 being closed early by the autocommand rather than directly by :fclose)
+    command('3fclose')
+    eq(false, api.nvim_win_is_valid(w1))
+    eq(false, api.nvim_win_is_valid(w2))
+    eq(false, api.nvim_win_is_valid(w3))
+    eq(true, api.nvim_win_is_valid(w4))
+
+    -- Try switching tab pages and moving windows between tab pages via nvim_win_set_config.
+    -- Simplest if :fclose skips windows in non-current tabpages.
+    local w5 = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 2 })
+    command('autocmd WinEnter * ++once tabnew')
+    eq(w4, api.nvim_get_current_win())
+    local tp1 = api.nvim_get_current_tabpage()
+    command('fclose!')
+    eq(false, api.nvim_win_is_valid(w4))
+    eq(true, api.nvim_win_is_valid(w5))
+    neq(tp1, api.nvim_get_current_tabpage())
+
+    local w_tp2 = api.nvim_get_current_win()
+    api.nvim_set_current_tabpage(tp1)
+    local w6 = api.nvim_open_win(0, false, { relative = 'editor', row = 0, col = 0, width = 5, height = 5, zindex = 1 })
+    exec_lua(function()
+      vim.api.nvim_create_autocmd('WinClosed', {
+        once = true,
+        callback = function()
+          vim.api.nvim_win_set_config(w6, { win = w_tp2, split = 'below' })
+        end,
+      })
+    end)
+    command('fclose!')
+    eq(false, api.nvim_win_is_valid(w5))
+    eq(true, api.nvim_win_is_valid(w6))
+    neq(tp1, api.nvim_win_get_tabpage(w6))
+  end)
+
+  local function with_ext_multigrid(multigrid, send_mouse_grid)
     local screen, attrs
     before_each(function()
       screen = Screen.new(40, 7, { ext_multigrid = multigrid })
@@ -6164,8 +6238,12 @@ describe('float window', function()
       end)
 
       local function test_float_mouse_focus()
-        if multigrid then
+        if send_mouse_grid then
           api.nvim_input_mouse('left', 'press', '', 4, 0, 0)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 2, 5)
+        end
+        if multigrid then
           screen:expect {
             grid = [[
           ## grid 1
@@ -6183,7 +6261,6 @@ describe('float window', function()
             float_pos = expected_pos,
           }
         else
-          api.nvim_input_mouse('left', 'press', '', 0, 2, 5)
           screen:expect([[
             x                                       |
             {0:~                                       }|
@@ -6194,8 +6271,12 @@ describe('float window', function()
           ]])
         end
 
-        if multigrid then
+        if send_mouse_grid then
           api.nvim_input_mouse('left', 'press', '', 2, 0, 0)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 0, 0)
+        end
+        if multigrid then
           screen:expect {
             grid = [[
           ## grid 1
@@ -6213,7 +6294,6 @@ describe('float window', function()
             float_pos = expected_pos,
           }
         else
-          api.nvim_input_mouse('left', 'press', '', 0, 0, 0)
           screen:expect([[
             ^x                                       |
             {0:~                                       }|
@@ -6237,27 +6317,53 @@ describe('float window', function()
       local function test_float_mouse_no_focus()
         api.nvim_buf_set_lines(0, -1, -1, true, { 'a' })
         expected_pos[4][6] = false
-        if multigrid then
+        if send_mouse_grid then
           api.nvim_input_mouse('left', 'press', '', 4, 0, 0)
-          screen:expect {
-            grid = [[
-          ## grid 1
-            [2:----------------------------------------]|*6
-            [3:----------------------------------------]|
-          ## grid 2
-            ^x                                       |
-            a                                       |
-            {0:~                                       }|*4
-          ## grid 3
-                                                    |
-          ## grid 4
-            {1:y                   }|
-            {2:~                   }|
-          ]],
-            float_pos = expected_pos,
-          }
         else
           api.nvim_input_mouse('left', 'press', '', 0, 2, 5)
+        end
+        if multigrid then
+          if send_mouse_grid then
+            -- Sending input to grid 4 is a user error, you are not supposed to pass a grid
+            -- that isn't focusable. In this case, nothing happens and the input is not passed
+            -- through to grid 4, like normally happens when you pass grid 0.
+            screen:expect {
+              grid = [[
+            ## grid 1
+              [2:----------------------------------------]|*6
+              [3:----------------------------------------]|
+            ## grid 2
+              ^x                                       |
+              a                                       |
+              {0:~                                       }|*4
+            ## grid 3
+                                                      |
+            ## grid 4
+              {1:y                   }|
+              {2:~                   }|
+            ]],
+              float_pos = expected_pos,
+            }
+          else
+            screen:expect {
+              grid = [[
+            ## grid 1
+              [2:----------------------------------------]|*6
+              [3:----------------------------------------]|
+            ## grid 2
+              x                                       |
+              ^a                                       |
+              {0:~                                       }|*4
+            ## grid 3
+                                                      |
+            ## grid 4
+              {1:y                   }|
+              {2:~                   }|
+            ]],
+              float_pos = expected_pos,
+            }
+          end
+        else
           screen:expect([[
             x                                       |
             ^a                                       |
@@ -6268,8 +6374,12 @@ describe('float window', function()
           ]])
         end
 
-        if multigrid then
+        if send_mouse_grid then
           api.nvim_input_mouse('left', 'press', '', 2, 0, 0)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 0, 0)
+        end
+        if multigrid then
           screen:expect {
             grid = [[
           ## grid 1
@@ -6289,7 +6399,6 @@ describe('float window', function()
             unchanged = true,
           }
         else
-          api.nvim_input_mouse('left', 'press', '', 0, 0, 0)
           screen:expect([[
             ^x                                       |
             a                                       |
@@ -7959,7 +8068,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'press', '', 4, 0, 0)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'press', '', 4, 0, 0)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 2, 5)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -7982,7 +8095,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'drag', '', 4, 1, 2)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'drag', '', 4, 1, 2)
+        else
+          api.nvim_input_mouse('left', 'drag', '', 0, 3, 7)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -8074,7 +8191,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'press', '', 4, 1, 1)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'press', '', 4, 1, 1)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 1, 6)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -8099,7 +8220,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'drag', '', 4, 2, 3)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'drag', '', 4, 2, 3)
+        else
+          api.nvim_input_mouse('left', 'drag', '', 0, 2, 8)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -8193,7 +8318,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'press', '', 4, 1, 0)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'press', '', 4, 1, 0)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 2, 5)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -8217,7 +8346,11 @@ describe('float window', function()
           },
         }
 
-        api.nvim_input_mouse('left', 'drag', '', 4, 2, 2)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'drag', '', 4, 2, 2)
+        else
+          api.nvim_input_mouse('left', 'drag', '', 0, 3, 7)
+        end
         screen:expect {
           grid = [[
         ## grid 1
@@ -8304,7 +8437,11 @@ describe('float window', function()
           {0:~                   }|*2
         ]])
 
-        api.nvim_input_mouse('left', 'press', '', 4, 2, 2)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'press', '', 4, 2, 2)
+        else
+          api.nvim_input_mouse('left', 'press', '', 0, 2, 22)
+        end
         screen:expect([[
         ## grid 1
           [2:-------------------]{5:│}[4:--------------------]|*5
@@ -8322,7 +8459,11 @@ describe('float window', function()
           {0:~                   }|*2
         ]])
 
-        api.nvim_input_mouse('left', 'drag', '', 4, 1, 1)
+        if send_mouse_grid then
+          api.nvim_input_mouse('left', 'drag', '', 4, 1, 1)
+        else
+          api.nvim_input_mouse('left', 'drag', '', 0, 1, 21)
+        end
         screen:expect([[
         ## grid 1
           [2:-------------------]{5:│}[4:--------------------]|*5
@@ -8409,21 +8550,21 @@ describe('float window', function()
         }
       end
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 3, 1)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 3, 6)
       end
       eq({ 0, 3, 1, 0, 1 }, fn.getcurpos())
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 3, 2)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 3, 7)
       end
       eq({ 0, 3, 1, 0, 2 }, fn.getcurpos())
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 3, 10)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 3, 15)
@@ -8470,8 +8611,12 @@ describe('float window', function()
         }
       end
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 2, 1)
+      else
+        api.nvim_input_mouse('left', 'press', '', 0, 2, 6)
+      end
+      if multigrid then
         screen:expect {
           grid = [[
         ## grid 1
@@ -8496,7 +8641,6 @@ describe('float window', function()
           },
         }
       else
-        api.nvim_input_mouse('left', 'press', '', 0, 2, 6)
         screen:expect {
           grid = [[
                {5:┌────────────────────┐}             |
@@ -8510,21 +8654,21 @@ describe('float window', function()
         }
       end
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 2, 2)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 2, 7)
       end
       eq({ 0, 2, 1, 0, 1 }, fn.getcurpos())
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 2, 3)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 2, 8)
       end
       eq({ 0, 2, 1, 0, 2 }, fn.getcurpos())
 
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('left', 'press', '', 4, 2, 11)
       else
         api.nvim_input_mouse('left', 'press', '', 0, 2, 16)
@@ -8840,8 +8984,12 @@ describe('float window', function()
       end
 
       -- Test scrolling by mouse
-      if multigrid then
+      if send_mouse_grid then
         api.nvim_input_mouse('wheel', 'down', '', 4, 2, 2)
+      else
+        api.nvim_input_mouse('wheel', 'down', '', 0, 4, 7)
+      end
+      if multigrid then
         screen:expect {
           grid = [[
         ## grid 1
@@ -8865,7 +9013,6 @@ describe('float window', function()
           float_pos = { [4] = { 1001, 'NW', 1, 2, 5, true, 50, 1, 2, 5 } },
         }
       else
-        api.nvim_input_mouse('wheel', 'down', '', 0, 4, 7)
         screen:expect([[
           Ut enim ad minim veniam, quis nostrud             |
           exercitation ullamco laboris nisi ut aliquip ex   |
@@ -11047,10 +11194,15 @@ describe('float window', function()
     end)
   end
 
-  describe('with ext_multigrid', function()
-    with_ext_multigrid(true)
+  describe('with ext_multigrid and actual mouse grid', function()
+    with_ext_multigrid(true, true)
   end)
+
+  describe('with ext_multigrid and mouse grid 0', function()
+    with_ext_multigrid(true, false)
+  end)
+
   describe('without ext_multigrid', function()
-    with_ext_multigrid(false)
+    with_ext_multigrid(false, false)
   end)
 end)

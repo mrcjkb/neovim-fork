@@ -192,7 +192,7 @@ void win_config_float(win_T *wp, WinConfig fconfig)
     int row = mouse_row;
     int col = mouse_col;
     int grid = mouse_grid;
-    win_T *mouse_win = mouse_find_win(&grid, &row, &col);
+    win_T *mouse_win = mouse_find_win_inner(&grid, &row, &col);
     if (mouse_win != NULL) {
       fconfig.relative = kFloatRelativeWindow;
       fconfig.row += row;
@@ -283,7 +283,8 @@ void win_float_remove(bool bang, int count)
     qsort(float_win_arr.items, float_win_arr.size, sizeof(win_T *), float_zindex_cmp);
   }
   for (size_t i = 0; i < float_win_arr.size; i++) {
-    if (win_close(float_win_arr.items[i], false, false) == FAIL) {
+    win_T *wp = float_win_arr.items[i];
+    if (win_valid(wp) && win_close(wp, false, false) == FAIL) {
       break;
     }
     if (!bang) {

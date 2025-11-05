@@ -3,7 +3,6 @@ local n = require('test.functional.testnvim')()
 
 local t_lsp = require('test.functional.plugin.lsp.testutil')
 
-local assert_log = t.assert_log
 local buf_lines = n.buf_lines
 local command = n.command
 local dedent = t.dedent
@@ -278,7 +277,7 @@ describe('LSP', function()
         on_exit = function(code, signal)
           eq(101, code, 'exit code') -- See fake-lsp-server.lua
           eq(0, signal, 'exit signal')
-          assert_log(
+          t.assert_log(
             pesc([[assert_eq failed: left == "\"shutdown\"", right == "\"test\""]]),
             fake_lsp_logfile
           )
@@ -1970,6 +1969,43 @@ describe('LSP', function()
           eq(table.remove(expected_handlers), { err, result, ctx }, 'expected handler')
         end,
       }
+    end)
+
+    it('should catch error while parsing invalid header', function()
+      local header = 'Content-Length: \r\n'
+      local called = false
+      exec_lua(function()
+        local server = assert(vim.uv.new_tcp())
+        server:bind('127.0.0.1', 0)
+        server:listen(1, function(e)
+          assert(not e, e)
+          local socket = assert(vim.uv.new_tcp())
+          server:accept(socket)
+          socket:write(header .. '\r\n', function()
+            socket:shutdown()
+            server:close()
+          end)
+        end)
+        local client = assert(vim.uv.new_tcp())
+        local on_read = require('vim.lsp.rpc').create_read_loop(function() end, function()
+          client:close()
+        end, function(err, code)
+          vim.rpcnotify(1, 'error', err, code)
+        end)
+        client:connect('127.0.0.1', server:getsockname().port, function()
+          client:read_start(on_read)
+        end)
+      end)
+      n.run(nil, function(method, args)
+        local err, code = unpack(args) --- @type string, number
+        eq('error', method)
+        eq(1, code)
+        matches(vim.pesc('Content-Length not found in header: ' .. header) .. '$', err)
+        called = true
+        stop()
+        return NIL
+      end, nil, 1000)
+      eq(true, called)
     end)
 
     it('should not trim vim.NIL from the end of a list', function()
@@ -5314,22 +5350,18 @@ describe('LSP', function()
                 notify_msg = msg
               end
 
-              local handler = vim.lsp.handlers['textDocument/formatting']
-              local handler_called = false
-              vim.lsp.handlers['textDocument/formatting'] = function()
-                handler_called = true
-              end
-
+              _G.handler_called = false
               vim.lsp.buf.format({ bufnr = bufnr, async = true })
               vim.wait(1000, function()
-                return handler_called
+                return _G.handler_called
               end)
 
               vim.notify = notify
-              vim.lsp.handlers['textDocument/formatting'] = handler
-              return { notify = notify_msg, handler_called = handler_called }
+              return { notify_msg = notify_msg, handler_called = _G.handler_called }
             end)
             eq({ handler_called = true }, result)
+          elseif ctx.method == 'textDocument/formatting' then
+            exec_lua('_G.handler_called = true')
           elseif ctx.method == 'shutdown' then
             client:stop()
           end
@@ -6558,6 +6590,35 @@ describe('LSP', function()
       )
     end)
 
+    it('handle nil config (some clients may not have a config!)', function()
+      exec_lua(create_server_definition)
+      exec_lua(function()
+        local server = _G._create_server()
+        vim.bo.filetype = 'lua'
+        -- Attach a client without defining a config.
+        local client_id = vim.lsp.start({
+          name = 'test_ls',
+          cmd = function(dispatchers, config)
+            _G.test_resolved_root = config.root_dir --[[@type string]]
+            return server.cmd(dispatchers, config)
+          end,
+        }, { bufnr = 0 })
+
+        local bufnr = vim.api.nvim_get_current_buf()
+        local client = vim.lsp.get_client_by_id(client_id)
+        assert(client.attached_buffers[bufnr])
+
+        -- Exercise the codepath which had a regression:
+        vim.lsp.enable('test_ls')
+        vim.api.nvim_exec_autocmds('FileType', { buffer = bufnr })
+
+        -- enable() does _not_ detach the client since it doesn't actually have a config.
+        -- XXX: otoh, is it confusing to allow `enable("foo")` if there a "foo" _client_ without a "foo" _config_?
+        assert(client.attached_buffers[bufnr])
+        assert(client_id == vim.lsp.get_client_by_id(bufnr).id)
+      end)
+    end)
+
     it('attaches to buffers when they are opened', function()
       exec_lua(create_server_definition)
 
@@ -6799,6 +6860,7 @@ describe('LSP', function()
     it('validates config on attach', function()
       local tmp1 = t.tmpname(true)
       exec_lua(function()
+        vim.fn.writefile({ '' }, fake_lsp_logfile)
         vim.lsp.log._set_filename(fake_lsp_logfile)
       end)
 
@@ -6808,22 +6870,32 @@ describe('LSP', function()
           vim.lsp.config('foo', cfg)
           vim.lsp.enable('foo')
           vim.cmd.edit(assert(tmp1))
+          vim.bo.filetype = 'non.applicable.filetype'
+        end)
+
+        -- Assert NO log for non-applicable 'filetype'. #35737
+        if type(cfg.filetypes) == 'table' then
+          t.assert_nolog(err, fake_lsp_logfile)
+        end
+
+        exec_lua(function()
           vim.bo.filetype = 'foo'
         end)
 
         retry(nil, 1000, function()
-          assert_log(err, fake_lsp_logfile)
+          t.assert_log(err, fake_lsp_logfile)
         end)
       end
 
       test_cfg({
+        filetypes = { 'foo' },
         cmd = { 'lolling' },
-      }, 'cannot start foo due to config error: .* lolling is not executable')
+      }, 'invalid "foo" config: .* lolling is not executable')
 
       test_cfg({
         cmd = { 'cat' },
         filetypes = true,
-      }, 'cannot start foo due to config error: .* filetypes: expected table, got boolean')
+      }, 'invalid "foo" config: .* filetypes: expected table, got boolean')
     end)
 
     it('does not start without workspace if workspace_required=true', function()

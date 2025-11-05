@@ -18,6 +18,7 @@ compile_commands.json
 /.cache/clangd/
 /.ccls-cache/
 /.clang-tidy
+/build
 
 .DS_Store
 *.mo
